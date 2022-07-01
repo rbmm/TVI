@@ -240,7 +240,7 @@ class ZTviTree : public ZMDIChildFrame, public ZView
 			if (reinterpret_cast<NMTVDISPINFOW*>(lpnm)->item.mask & TVIF_TEXT)
 			{
 				PSTR psz = (PSTR)reinterpret_cast<NMTVDISPINFOW*>(lpnm)->item.lParam;
-				ULONG len = *psz++;
+				ULONG len = *(PUCHAR)psz++;
 
 				if (ULONG cchTextMax = reinterpret_cast<NMTVDISPINFOW*>(lpnm)->item.cchTextMax)
 				{
@@ -433,6 +433,8 @@ class ZMainWnd : public ZMDIFrameWnd
 {
 	virtual LRESULT WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	{
+		enum { cmd_open = '\v\v\v\v' };
+
 		switch (uMsg)
 		{
 		case WM_COMMAND:
@@ -455,6 +457,25 @@ class ZMainWnd : public ZMDIFrameWnd
 				break;
 			}
 			break;
+		case WM_CREATE:
+			if (PWSTR psz = wcschr(GetCommandLineW(), '\v'))
+			{
+				PostMessageA(hwnd, WM_APP, cmd_open, (LPARAM)(1 + psz));
+			}
+			break;
+		case WM_APP:
+			if (wParam == cmd_open)
+			{
+				if (ZTviDoc* p = new ZTviDoc)
+				{
+					lParam = p->Open((PWSTR)lParam);
+					p->Release();
+				}
+				if (0 > lParam)
+				{
+					ShowErrorBox(hwnd, L"Fail Open Document", (HRESULT)lParam, MB_OK);
+				}
+			}
 		}
 		return __super::WindowProc(hwnd, uMsg, wParam, lParam);
 	}
@@ -491,8 +512,97 @@ void zmain()
 	}
 }
 
+struct XKey 
+{
+	XKey* next;
+	XKey* child;
+	PCWSTR Name;
+	const void* pvData;
+	ULONG cbData;
+	ULONG Type;
+
+	XKey(PCWSTR Name, XKey* next, XKey* child, const void* pvData, ULONG cbData, ULONG Type)
+		: next(next), child(child), Name(Name), pvData(pvData), cbData(cbData), Type(Type)
+	{
+	}
+
+	NTSTATUS Create(HANDLE hKey, PCSTR prefix)
+	{
+		NTSTATUS status;
+		UNICODE_STRING ObjectName;
+		RtlInitUnicodeString(&ObjectName, Name);
+
+		if (pvData)
+		{
+			status = ZwSetValueKey(hKey, &ObjectName, 0, Type, const_cast<void*>(pvData), cbData);
+
+			DbgPrint("%s%wZ = %x\r\n", prefix, &ObjectName, status);
+		}
+		else
+		{
+			OBJECT_ATTRIBUTES oa = { sizeof(oa), hKey, &ObjectName, OBJ_CASE_INSENSITIVE };
+
+			status = ZwCreateKey(&hKey, KEY_ALL_ACCESS, &oa, 0, 0, 0, 0);
+
+			DbgPrint("%s[%wZ] = %x\r\n", prefix, &ObjectName, status);
+
+			if (0 <= status)
+			{
+				if (XKey* p = child)
+				{
+					--prefix;
+					do
+					{
+						if (0 > (status = p->Create(hKey, prefix)))
+						{
+							break;
+						}
+
+					} while (p = p->next);
+				}
+
+				NtClose(hKey);
+			}
+		}
+
+		return status;
+	}
+};
+
+HRESULT RegisterTVI()
+{
+	STATIC_WSTRING(suffix, "\"\v%1");
+	HRESULT hr;
+	PVOID stack = alloca(sizeof(suffix));
+	PWSTR szExePath;
+	ULONG cb = 0x20, cch = 0;
+	do 
+	{
+		szExePath = (PWSTR)alloca(cb <<= 1);
+		cch = GetModuleFileNameW(0, szExePath + 1, RtlPointerToOffset(szExePath + 1, stack) / sizeof(WCHAR));
+	} while ((hr = GetLastError()) == ERROR_INSUFFICIENT_BUFFER);
+
+	if (0 <= hr)
+	{
+		*szExePath = '\"';
+		wcscpy(szExePath + 1 + cch, suffix);
+		// (PCWSTR Name, XKey* next, XKey* child, const void* pvData, ULONG cbData, ULONG Type)
+		XKey Default(0, 0, 0, szExePath, (ULONG)wcslen(szExePath) * sizeof(WCHAR), REG_SZ);
+		XKey command(L"command", 0, &Default, 0, 0, REG_NONE);
+		XKey open(L"open", 0, &command, 0, 0, REG_NONE);
+		XKey shell(L"shell", 0, &open, 0, 0, REG_NONE);
+		XKey tvi(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Classes\\.tvi", 0, &shell, 0, 0, REG_NONE);
+
+		char prefix[] = "\t\t\t\t\t\t\t";
+		hr = tvi.Create(0, prefix + _countof(prefix) - 1);
+	}
+
+	return hr;
+}
+
 void WINAPI ep(void*)
 {
+	RegisterTVI();
 	initterm();
 	zmain();
 	destroyterm();
