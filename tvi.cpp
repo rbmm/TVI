@@ -78,9 +78,14 @@ struct AUX
 	ULONG len = 0;
 	ULONG cb;
 	AUX(ULONG cb) : cb(cb) {}
+
+	void Reset()
+	{
+		MaxLevel = 0, len = 0;
+	}
 };
 
-PUCHAR IsValidTvi(ULONG level, PUCHAR buf, ULONG cb, AUX* p)
+PUCHAR IsValidTvi(ULONG level, PUCHAR buf, ULONG cb, AUX* p/*, PCSTR prefix*/)
 {
 	if (cb < 1)
 	{
@@ -101,11 +106,13 @@ PUCHAR IsValidTvi(ULONG level, PUCHAR buf, ULONG cb, AUX* p)
 
 	p->len += level + len + 2;
 
-	buf += len, cb -= len, level++;
+	//DbgPrint("%s%.*s\n", prefix, len, buf);
+
+	buf += len, cb -= len, level++/*, prefix--*/;
 
 	while (cb && *buf)
 	{
-		if (!(buf = IsValidTvi(level, buf, cb, p)) || !(cb = p->cb))
+		if (!(buf = IsValidTvi(level, buf, cb, p/*, prefix*/)) || !(cb = p->cb))
 		{
 			return 0;
 		}
@@ -154,6 +161,10 @@ const UCHAR* Dump(PCSTR prefix, const UCHAR* psz, ED* p)
 class ZTviTree : public ZMDIChildFrame, public ZView
 {
 	enum { ID_TV = 1 };
+
+	PCUCHAR _pszTvi;
+	ULONG _cch;
+	ULONG _maxlevel;
 
 	virtual ZWnd* getWnd()
 	{
@@ -253,7 +264,7 @@ class ZTviTree : public ZMDIChildFrame, public ZView
 		return 0;
 	}
 public:
-	ZTviTree(ZDocument* pDoc) : ZView(pDoc)
+	ZTviTree(ZDocument* pDoc, PCUCHAR pszTvi, ULONG cch, ULONG maxlevel) : ZView(pDoc), _pszTvi(pszTvi), _cch(cch), _maxlevel(maxlevel)
 	{
 	}
 };
@@ -273,9 +284,6 @@ PCWSTR PathGetFileName(PCWSTR lpFileName)
 class ZTviDoc : public ZDocument
 {
 	PSTR _pszTvi = 0;
-	ULONG _cbTvi = 0;
-	ULONG _cch = 0;
-	ULONG _maxlevel = 0;
 
 	~ZTviDoc()
 	{
@@ -296,30 +304,6 @@ class ZTviDoc : public ZDocument
 	}
 
 public:
-
-	void Copy(HWND hwnd)
-	{
-		if (ULONG cch = _cch)
-		{
-			if (OpenClipboard(hwnd))
-			{
-				EmptyClipboard();
-				if (HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, cch * sizeof(WCHAR)))
-				{
-					ED e { (PWSTR)GlobalLock(hg), cch };
-					ULONG maxlevel = _maxlevel;
-					PSTR prefix = (PSTR)alloca(maxlevel + 1);
-					memset(prefix, '\t', maxlevel);
-					prefix[maxlevel] = 0;
-					PCUCHAR psz = Dump(prefix + maxlevel, (PCUCHAR)_pszTvi, &e);
-
-					GlobalUnlock(hg);
-					if (!psz || !SetClipboardData(CF_UNICODETEXT, hg)) GlobalFree(hg);
-				}
-				CloseClipboard();
-			}
-		}
-	}
 
 	HRESULT Open(HWND hwnd)
 	{
@@ -381,30 +365,40 @@ public:
 					{
 						AUX a((ULONG)iosb.Information);
 
-						if (IsValidTvi(0, (PUCHAR)buf, (ULONG)iosb.Information, &a) && !a.cb)
-						{
-							if (a.MaxLevel - 1 < 0x40)
-							{
-								_maxlevel = a.MaxLevel;
-								_cch = a.len + 1;
-							}
+						//char prefix[65];
+						//memset(prefix, '\t', _countof(prefix)-1);
+						//prefix[_countof(prefix) - 1]=0;
 
-							if (ZTviTree* p = new ZTviTree(this))
+						ULONG i = 8;
+						PUCHAR pb = (PUCHAR)buf, pc;
+						do 
+						{
+							a.Reset();
+							if (pc = IsValidTvi(0, pb, a.cb, &a/*, prefix + _countof(prefix) - 1*/))
 							{
-								if (p->Create(PathGetFileName(lpFileName), buf))
+								if (ZTviTree* p = new ZTviTree(this, pb, a.len + 1, a.MaxLevel))
 								{
-									AddView(p);
+									p->Create(PathGetFileName(lpFileName), pb);
+									p->Release();
 								}
-								p->Release();
+
+							}
+							else
+							{
+								status = STATUS_INVALID_IMAGE_FORMAT;
+								break;
 							}
 
-							_pszTvi = buf, _cbTvi = (ULONG)iosb.Information, buf = 0;
-						}
-						else
-						{
-							status = STATUS_INVALID_IMAGE_FORMAT;
-						}
+							if (!--i)
+							{
+								break;
+							}
+
+						} while (pb = pc, a.cb);
+
+						_pszTvi = buf, buf = 0;
 					}
+
 					if (buf) delete [] buf;
 				}
 				else
@@ -424,9 +418,28 @@ public:
 	}
 };
 
-void ZTviTree::Copy(HWND hWnd)
+void ZTviTree::Copy(HWND hwnd)
 {
-	static_cast<ZTviDoc*>(_pDocument)->Copy(hWnd);
+	if (ULONG cch = _cch)
+	{
+		if (OpenClipboard(hwnd))
+		{
+			EmptyClipboard();
+			if (HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, cch * sizeof(WCHAR)))
+			{
+				ED e { (PWSTR)GlobalLock(hg), cch };
+				ULONG maxlevel = _maxlevel;
+				PSTR prefix = (PSTR)alloca(maxlevel + 1);
+				memset(prefix, '\t', maxlevel);
+				prefix[maxlevel] = 0;
+				PCUCHAR psz = Dump(prefix + maxlevel, (PCUCHAR)_pszTvi, &e);
+
+				GlobalUnlock(hg);
+				if (!psz || !SetClipboardData(CF_UNICODETEXT, hg)) GlobalFree(hg);
+			}
+			CloseClipboard();
+		}
+	}
 }
 
 class ZMainWnd : public ZMDIFrameWnd
