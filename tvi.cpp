@@ -539,46 +539,41 @@ struct XKey
 	{
 	}
 
-	NTSTATUS Create(HANDLE hKey, PCSTR prefix)
+	NTSTATUS Create(HANDLE hKey, PUNICODE_STRING ObjectName, PCSTR prefix)
 	{
-		NTSTATUS status;
-		UNICODE_STRING ObjectName;
-		RtlInitUnicodeString(&ObjectName, Name);
+		OBJECT_ATTRIBUTES oa = { sizeof(oa), hKey, ObjectName, OBJ_CASE_INSENSITIVE };
 
-		if (pvData)
+		NTSTATUS status = ZwCreateKey(&hKey, KEY_ALL_ACCESS, &oa, 0, 0, 0, 0);
+
+		//DbgPrint("%s[%wZ] = %x\r\n", prefix, ObjectName, status);
+
+		if (0 <= status)
 		{
-			status = ZwSetValueKey(hKey, &ObjectName, 0, Type, const_cast<void*>(pvData), cbData);
-
-			DbgPrint("%s%wZ = %x\r\n", prefix, &ObjectName, status);
-		}
-		else
-		{
-			OBJECT_ATTRIBUTES oa = { sizeof(oa), hKey, &ObjectName, OBJ_CASE_INSENSITIVE };
-
-			status = ZwCreateKey(&hKey, KEY_ALL_ACCESS, &oa, 0, 0, 0, 0);
-
-			DbgPrint("%s[%wZ] = %x\r\n", prefix, &ObjectName, status);
-
-			if (0 <= status)
+			if (XKey* p = child)
 			{
-				if (XKey* p = child)
+				--prefix;
+				do
 				{
-					--prefix;
-					do
+					if (0 > (status = p->Create(hKey, prefix)))
 					{
-						if (0 > (status = p->Create(hKey, prefix)))
-						{
-							break;
-						}
+						break;
+					}
 
-					} while (p = p->next);
-				}
-
-				NtClose(hKey);
+				} while (p = p->next);
 			}
+
+			NtClose(hKey);
 		}
 
 		return status;
+	}
+
+	NTSTATUS Create(HANDLE hKey, PCSTR prefix)
+	{
+		UNICODE_STRING ObjectName;
+		RtlInitUnicodeString(&ObjectName, Name);
+
+		return pvData ? ZwSetValueKey(hKey, &ObjectName, 0, Type, const_cast<void*>(pvData), cbData) : Create(hKey, &ObjectName, prefix);
 	}
 };
 
@@ -595,19 +590,39 @@ HRESULT RegisterTVI()
 		cch = GetModuleFileNameW(0, szExePath + 1, RtlPointerToOffset(szExePath + 1, stack) / sizeof(WCHAR));
 	} while ((hr = GetLastError()) == ERROR_INSUFFICIENT_BUFFER);
 
+	*szExePath = '\"';
+	wcscpy(szExePath + 1 + cch, suffix);
+
 	if (0 <= hr)
 	{
-		*szExePath = '\"';
-		wcscpy(szExePath + 1 + cch, suffix);
-		// (PCWSTR Name, XKey* next, XKey* child, const void* pvData, ULONG cbData, ULONG Type)
-		XKey Default(0, 0, 0, szExePath, (ULONG)wcslen(szExePath) * sizeof(WCHAR), REG_SZ);
-		XKey command(L"command", 0, &Default, 0, 0, REG_NONE);
-		XKey open(L"open", 0, &command, 0, 0, REG_NONE);
-		XKey shell(L"shell", 0, &open, 0, 0, REG_NONE);
-		XKey tvi(L"\\REGISTRY\\MACHINE\\SOFTWARE\\Classes\\.tvi", 0, &shell, 0, 0, REG_NONE);
+		UNICODE_STRING RegistryPath;
+		if (0 <= (hr = RtlFormatCurrentUserKeyPath(&RegistryPath)))
+		{
+			PWSTR psz = 0;
+			cch = 0;
+			while (0 < (cch = _snwprintf(psz, cch, L"%wZ\\Software\\Classes\\.tvi", &RegistryPath)))
+			{
+				if (psz)
+				{
+					// (PCWSTR Name, XKey* next, XKey* child, const void* pvData, ULONG cbData, ULONG Type)
+					XKey Default(0, 0, 0, szExePath, (ULONG)wcslen(szExePath) * sizeof(WCHAR), REG_SZ);
+					XKey command(L"command", 0, &Default, 0, 0, REG_NONE);
+					XKey open(L"open", 0, &command, 0, 0, REG_NONE);
+					XKey shell(L"shell", 0, &open, 0, 0, REG_NONE);
+					XKey tvi(psz, 0, &shell, 0, 0, REG_NONE);
+					//XKey Classes(L"Classes", 0, &tvi, 0, 0, REG_NONE);
+					//XKey User(0, 0, &tvi, 0, 0, REG_NONE);
 
-		char prefix[] = "\t\t\t\t\t\t\t";
-		hr = tvi.Create(0, prefix + _countof(prefix) - 1);
+					char prefix[] = "\t\t\t\t\t\t\t";
+					hr = tvi.Create(0, prefix + _countof(prefix) - 1);
+					break;
+				}
+
+				psz = (PWSTR)alloca(++cch * sizeof(WCHAR));
+			}
+
+			RtlFreeUnicodeString(&RegistryPath);
+		}
 	}
 
 	return hr;
